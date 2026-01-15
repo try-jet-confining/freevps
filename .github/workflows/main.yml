@@ -3,6 +3,7 @@ name: RDP_TIPSUNIX with State Persistence
 on:
   workflow_dispatch:
 
+# Grant write permissions to workflow
 permissions:
   contents: write
 
@@ -23,33 +24,16 @@ jobs:
       - name: Prepare Tailscale directory
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path "C:\\ProgramData\\Tailscale" -Force | Out-Null
+          New-Item -ItemType Directory -Path "C:\ProgramData\Tailscale" -Force | Out-Null
           Write-Host "Tailscale directory prepared"
-          
-      # === INSTALL DOCKER ===
-      - name: Install Docker Desktop
-        shell: pwsh
-        run: |
-          $dockerUrl = "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
-          $installerPath = "$env:TEMP\\docker_installer.exe"
-          
-          # Download installer
-          Invoke-WebRequest -Uri $dockerUrl -OutFile $installerPath
-          
-          # Silent install
-          Start-Process -FilePath $installerPath -ArgumentList "install --quiet --accept-license" -Wait
-          
-          # Cleanup
-          Remove-Item $installerPath -Force
-          Write-Host "Docker Desktop installed successfully"
-          
+    
       # === RESTORE STATE ===
       - name: Restore Tailscale state from repository
         shell: pwsh
         run: |
           Write-Host "Current directory: $(Get-Location)"
-          if (Test-Path ".github\\state\\server-state.conf") {
-              Copy-Item ".github\\state\\server-state.conf" -Destination "C:\\ProgramData\\Tailscale\\server-state.conf" -Force
+          if (Test-Path ".github\state\server-state.conf") {
+              Copy-Item ".github\state\server-state.conf" -Destination "C:\ProgramData\Tailscale\server-state.conf" -Force
               Write-Host "✅ Tailscale state restored from repository"
           } else {
               Write-Host "⚠️ No previous state found (this is normal for first run)"
@@ -58,21 +42,23 @@ jobs:
       - name: Configure Core RDP Settings
         run: |
           # Enable Remote Desktop and disable Network Level Authentication (if needed)
-          Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server' `
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp' `
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp' `
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
+
           # Remove any existing rule with the same name to avoid duplication
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           
           # For testing, allow any incoming connection on port 3389
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
+
           # (Optional) Restart the Remote Desktop service to ensure changes take effect
           Restart-Service -Name TermService -Force
-      
+
       - name: Create RDP User with Secure Password
         run: |
           Add-Type -AssemblyName System.Security
@@ -100,26 +86,26 @@ jobs:
               Write-Error "User creation failed"
               exit 1
           }
-      
+
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\\tailscale.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
           
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
-      
+
       - name: Establish Tailscale Connection
         run: |
           # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\\Tailscale\\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
           
           # Wait for Tailscale to assign an IP
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\\Tailscale\\tailscale.exe" ip -4
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
               Start-Sleep -Seconds 5
               $retries++
           }
@@ -141,7 +127,7 @@ jobs:
               exit 1
           }
           Write-Host "TCP connectivity successful!"
-      
+
       - name: Maintain Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
@@ -156,18 +142,18 @@ jobs:
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
           }
-      
+
       # === SAVE STATE TO REPOSITORY ===
       - name: Save Tailscale state to repository
         if: always()
         shell: pwsh
         run: |
-          if (Test-Path "C:\\ProgramData\\Tailscale\\server-state.conf") {
+          if (Test-Path "C:\ProgramData\Tailscale\server-state.conf") {
               # Prepare state directory
-              New-Item -ItemType Directory -Path ".github\\state" -Force | Out-Null
+              New-Item -ItemType Directory -Path ".github\state" -Force | Out-Null
               
               # Copy state file
-              Copy-Item "C:\\ProgramData\\Tailscale\\server-state.conf" -Destination ".github\\state\\server-state.conf" -Force
+              Copy-Item "C:\ProgramData\Tailscale\server-state.conf" -Destination ".github\state\server-state.conf" -Force
               
               Write-Host "✅ State file copied to repository"
           } else {
@@ -186,8 +172,8 @@ jobs:
           git pull --rebase origin main
     
           # Backup old state and copy new one
-          if (Test-Path "C:\\ProgramData\\Tailscale\\server-state.conf") {
-              Copy-Item "C:\\ProgramData\\Tailscale\\server-state.conf" ".github\\state\\server-state.conf" -Force
+          if (Test-Path "C:\ProgramData\Tailscale\server-state.conf") {
+              Copy-Item "C:\ProgramData\Tailscale\server-state.conf" ".github\state\server-state.conf" -Force
               Write-Host "🗂️ Copied new Tailscale state file"
           } else {
               Write-Host "⚠️ No state file found to save"
