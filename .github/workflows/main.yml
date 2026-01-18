@@ -1,186 +1,129 @@
-name: RDP_TIPSUNIX with State Persistence
+name: Tailscale Runner with State Persistence
 
 on:
   workflow_dispatch:
-
-# Grant write permissions to workflow
-permissions:
-  contents: write
+  push:
+    branches:
+      - main
 
 jobs:
-  secure-rdp:
+  runner:
     runs-on: windows-latest
-    timeout-minutes: 3600
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          persist-credentials: true
-          fetch-depth: 0
-    
-      # === PREPARE ===
-      - name: Prepare Tailscale directory
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path "C:\ProgramData\Tailscale" -Force | Out-Null
-          Write-Host "Tailscale directory prepared"
-    
+
       # === RESTORE STATE ===
-      - name: Restore Tailscale state from repository
+      - name: Restore Tailscale state from Google Drive
         shell: pwsh
         run: |
-          Write-Host "Current directory: $(Get-Location)"
-          if (Test-Path ".github\state\server-state.conf") {
-              Copy-Item ".github\state\server-state.conf" -Destination "C:\ProgramData\Tailscale\server-state.conf" -Force
-              Write-Host "✅ Tailscale state restored from repository"
+          Write-Host "=== Restoring Tailscale state from Google Drive ==="
+
+          # === Setup Paths ===
+          $credPath = "$env:TEMP\service-account.json"
+          $confPath = "$env:TEMP\rclone.conf"
+          $localDir = "C:\ProgramData\Tailscale"
+          $stateFile = "server-state.conf"
+          $driveFolderId = "1pa6J-zMHmhkFExunAcXWitHW1SU976Wo"
+
+          # === Write service account credential from secret ===
+          $json = '${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}'
+          $json | Out-File -FilePath $credPath -Encoding utf8
+
+          # === Prepare local dir ===
+          New-Item -ItemType Directory -Path $localDir -Force | Out-Null
+
+          # === Install rclone ===
+          Write-Host "Downloading and installing rclone..."
+          Invoke-WebRequest -Uri "https://downloads.rclone.org/rclone-current-windows-amd64.zip" -OutFile "rclone.zip"
+          Expand-Archive rclone.zip -DestinationPath . -Force
+          Move-Item .\rclone-*\rclone.exe . -Force
+          $env:PATH += ";$pwd"
+
+          # === Create rclone config ===
+          $confContent = @"
+          [drive]
+          type = drive
+          scope = drive
+          service_account_file = $credPath
+          "@
+          $confContent | Out-File -FilePath $confPath -Encoding utf8
+
+          # === Try to restore from Drive ===
+          Write-Host "Attempting to restore state from Google Drive folder ID: $driveFolderId"
+          try {
+              & .\rclone.exe copy drive:$stateFile $localDir --config=$confPath --drive-root-folder-id=$driveFolderId --no-traverse --ignore-errors
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Host "⚠️ rclone exited with code $LASTEXITCODE — probably first run. Continuing..."
+                  $LASTEXITCODE = 0
+              }
+          } catch {
+              Write-Host "⚠️ Exception caught while restoring (likely first run). Continuing..."
+          }
+
+          if (Test-Path "$localDir\$stateFile") {
+              Write-Host "✅ Restored previous Tailscale state: $localDir\$stateFile"
           } else {
-              Write-Host "⚠️ No previous state found (this is normal for first run)"
+              Write-Host "⚠️ No previous state found — starting fresh (this is normal on first run)."
           }
-    
-      - name: Configure Core RDP Settings
+
+      # === START TAILSCALE ===
+      - name: Start Tailscale
+        shell: pwsh
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+          Write-Host "=== Starting Tailscale ==="
+          tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-runner
+          Write-Host "Tailscale started successfully."
 
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          
-          # For testing, allow any incoming connection on port 3389
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
-
-          # (Optional) Restart the Remote Desktop service to ensure changes take effect
-          Restart-Service -Name TermService -Force
-
-      - name: Create RDP User with Secure Password
+      # === MAIN TASK ===
+      - name: Do your main work
         run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)      # A-Z
-              Lower   = [char[]](97..122)     # a-z
-              Number  = [char[]](48..57)      # 0-9
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126)) # Special characters
-          }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
-          
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
-              exit 1
-          }
+          echo "Running main tasks..."
+          # Tambahkan perintah build/test/deploy kamu di sini
+          # Misalnya:
+          # npm ci && npm run build
 
-      - name: Install Tailscale
-        run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-
-      - name: Establish Tailscale Connection
-        run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
-          # Wait for Tailscale to assign an IP
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-          
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
-      - name: Verify RDP Accessibility
-        run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
-
-      - name: Maintain Connection
-        run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "http://www.youtube.com/@TipsUNIX"
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
-          Write-Host "==================`n"
-          
-          # Keep runner active indefinitely (or until manually cancelled)
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
-          }
-
-      # === SAVE STATE TO REPOSITORY ===
-      - name: Save Tailscale state to repository
+      # === SAVE STATE ===
+      - name: Save updated Tailscale state back to Google Drive
         if: always()
         shell: pwsh
         run: |
-          if (Test-Path "C:\ProgramData\Tailscale\server-state.conf") {
-              # Prepare state directory
-              New-Item -ItemType Directory -Path ".github\state" -Force | Out-Null
-              
-              # Copy state file
-              Copy-Item "C:\ProgramData\Tailscale\server-state.conf" -Destination ".github\state\server-state.conf" -Force
-              
-              Write-Host "✅ State file copied to repository"
+          Write-Host "=== Uploading updated Tailscale state to Google Drive ==="
+
+          $credPath = "$env:TEMP\service-account.json"
+          $confPath = "$env:TEMP\rclone.conf"
+          $localDir = "C:\ProgramData\Tailscale"
+          $stateFile = "server-state.conf"
+          $driveFolderId = "1pa6J-zMHmhkFExunAcXWitHW1SU976Wo"
+
+          # === Write creds again ===
+          $json = '${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}'
+          $json | Out-File -FilePath $credPath -Encoding utf8
+
+          # === Create rclone config ===
+          $confContent = @"
+          [drive]
+          type = drive
+          scope = drive
+          service_account_file = $credPath
+          "@
+          $confContent | Out-File -FilePath $confPath -Encoding utf8
+
+          # === Upload state file ===
+          if (Test-Path "$localDir\$stateFile") {
+              Write-Host "Uploading $stateFile to Google Drive folder ID: $driveFolderId ..."
+              try {
+                  & .\rclone.exe copy "$localDir\$stateFile" drive: --config=$confPath --drive-root-folder-id=$driveFolderId --ignore-errors --no-traverse
+                  if ($LASTEXITCODE -eq 0) {
+                      Write-Host "✅ State uploaded successfully."
+                  } else {
+                      Write-Host "⚠️ Upload exited with code $LASTEXITCODE (ignored)."
+                      $LASTEXITCODE = 0
+                  }
+              } catch {
+                  Write-Host "⚠️ Exception while uploading state — continuing anyway."
+              }
           } else {
-              Write-Host "⚠️ No state file to save"
+              Write-Host "⚠️ No local state file found to upload."
           }
-      
-      # === SAVE STATE BACK TO REPOSITORY ===
-      - name: Sync and commit updated Tailscale state
-        shell: pwsh
-        run: |
-          Write-Host "🔁 Syncing repository before commit..."
-          git config --global user.name "github-actions"
-          git config --global user.email "actions@github.com"
-          git fetch origin main
-          git checkout main
-          git pull --rebase origin main
-    
-          # Backup old state and copy new one
-          if (Test-Path "C:\ProgramData\Tailscale\server-state.conf") {
-              Copy-Item "C:\ProgramData\Tailscale\server-state.conf" ".github\state\server-state.conf" -Force
-              Write-Host "🗂️ Copied new Tailscale state file"
-          } else {
-              Write-Host "⚠️ No state file found to save"
-          }
-    
-          # Commit and push safely
-          git add .github/state/server-state.conf
-          git commit -m "Save Tailscale state [skip ci]" || echo "No changes to commit"
-          git push origin main || (Write-Host "Push failed, retrying with rebase..." && git pull --rebase origin main && git push origin main)
-          Write-Host "✅ State committed to repository successfully"
