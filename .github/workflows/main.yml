@@ -6,6 +6,7 @@ on:
 # Grant write permissions to workflow
 permissions:
   contents: write
+  actions: write
 
 jobs:
   secure-rdp:
@@ -35,79 +36,6 @@ jobs:
               Write-Host "✅ Tailscale state restored from repository"
           } else {
               Write-Host "⚠️ No previous state found (this is normal for first run)"
-          }
-
-      # === RESTORE STATE === (DISABLED - Google Drive)
-      # Note: Google Drive tidak bisa digunakan karena Service Account tidak punya storage quota
-      - name: Restore Tailscale state (DISABLED - Google Drive)
-        if: false
-        shell: pwsh
-        run: |
-          Write-Host "=== Restoring Tailscale state from Google Drive ==="
-
-          # === Setup Paths ===
-          $credPath = "$env:TEMP\service-account.json"
-          $confPath = "$env:TEMP\rclone.conf"
-          $localDir = "C:\ProgramData\Tailscale"
-          $stateFile = "server-state.conf"
-          $driveFolderId = "1pa6J-zMHmhkFExunAcXWitHW1SU976Wo"
-
-          # === Write service account credential from secret ===
-          $json = '${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}'
-          
-          # Simply validate and write the JSON
-          try {
-              # Validate it can be parsed
-              $jsonObj = $json | ConvertFrom-Json
-              Write-Host "JSON validation: ✅"
-              Write-Host "   Client Email: $($jsonObj.client_email)"
-              Write-Host "   Project ID: $($jsonObj.project_id)"
-              
-              # Write JSON directly as-is (format is already correct from ConvertTo-Json -Compress)
-              Set-Content -Path $credPath -Value $json -Encoding UTF8 -NoNewline
-              Write-Host "✅ JSON written to: $credPath"
-          } catch {
-              Write-Host "❌ Error: Invalid JSON in secret"
-              Write-Host "Error: $_"
-              Write-Host "First 200 chars: $($json.Substring(0, [Math]::Min(200, $json.Length)))"
-              exit 1
-          }
-
-          # === Prepare local dir ===
-          New-Item -ItemType Directory -Path $localDir -Force | Out-Null
-
-          # === Install rclone ===
-          Write-Host "Downloading and installing rclone..."
-          Invoke-WebRequest -Uri "https://downloads.rclone.org/rclone-current-windows-amd64.zip" -OutFile "rclone.zip"
-          Expand-Archive rclone.zip -DestinationPath . -Force
-          Move-Item .\rclone-*\rclone.exe . -Force
-          $env:PATH += ";$pwd"
-
-          # === Create rclone config ===
-          $confContent = @"
-          [drive]
-          type = drive
-          scope = drive
-          service_account_file = $credPath
-          "@
-          $confContent | Out-File -FilePath $confPath -Encoding utf8
-
-          # === Try to restore from Drive ===
-          Write-Host "Attempting to restore state from Google Drive folder ID: $driveFolderId"
-          try {
-              & .\rclone.exe copy drive:$stateFile $localDir --config=$confPath --drive-root-folder-id=$driveFolderId --no-traverse --ignore-errors
-              if ($LASTEXITCODE -ne 0) {
-                  Write-Host "⚠️ rclone exited with code $LASTEXITCODE — probably first run. Continuing..."
-                  $LASTEXITCODE = 0
-              }
-          } catch {
-              Write-Host "⚠️ Exception caught while restoring (likely first run). Continuing..."
-          }
-
-          if (Test-Path "$localDir\$stateFile") {
-              Write-Host "✅ Restored previous Tailscale state: $localDir\$stateFile"
-          } else {
-              Write-Host "⚠️ No previous state found — starting fresh (this is normal on first run)."
           }
 
       - name: Configure Core RDP Settings
@@ -208,11 +136,18 @@ jobs:
           Write-Host "Password: $(echo $env:RDP_CREDS)"
           Write-Host "==================`n"
           
-          # Keep runner active indefinitely (or until manually cancelled)
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+          # Keep runner active for a limited time (e.g., 5.5 hours) before auto-restarting
+          $startTime = Get-Date
+          $durationMinutes = 330
+          Write-Host "Target duration: $durationMinutes minutes"
+          
+          while ((Get-Date) -lt $startTime.AddMinutes($durationMinutes)) {
+              $elapsed = (Get-Date) - $startTime
+              $remaining = $startTime.AddMinutes($durationMinutes) - (Get-Date)
+              Write-Host "[$(Get-Date)] RDP Active - Elapsed: $([Math]::Round($elapsed.TotalMinutes)) min | Remaining: $([Math]::Round($remaining.TotalMinutes)) min"
               Start-Sleep -Seconds 300
           }
+          Write-Host "Reaching time limit. Preparing to restart..."
 
       # === SAVE STATE TO REPOSITORY ===
       - name: Save Tailscale state to repository
@@ -253,49 +188,16 @@ jobs:
               Write-Host "ℹ️ No changes to commit"
           }
 
-      # === SAVE STATE === (DISABLED - Service Account tidak punya storage quota)
-      - name: Save Tailscale state to Google Drive (DISABLED)
-        if: false
+      - name: Trigger next workflow run
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          Write-Host "=== Uploading Tailscale state to Google Drive ==="
-
-          $credPath = "$env:TEMP\service-account.json"
-          $confPath = "$env:TEMP\rclone.conf"
-          $localDir = "C:\ProgramData\Tailscale"
-          $stateFile = "server-state.conf"
-          $driveFolderId = "1pa6J-zMHmhkFExunAcXWitHW1SU976Wo"
-
-          # === Write creds again ===
-          $json = '${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}'
-          
-          # Write JSON directly - it's already in correct format
-          Set-Content -Path $credPath -Value $json -Encoding UTF8 -NoNewline
-
-          # === Create rclone config ===
-          $confContent = @"
-          [drive]
-          type = drive
-          scope = drive
-          service_account_file = $credPath
-          "@
-          $confContent | Out-File -FilePath $confPath -Encoding utf8
-
-          # === Upload state file ===
-          if (Test-Path "$localDir\$stateFile") {
-              Write-Host "Uploading $stateFile to Google Drive folder ID: $driveFolderId ..."
-              try {
-                  & .\rclone.exe copy "$localDir\$stateFile" drive: --config=$confPath --drive-root-folder-id=$driveFolderId --ignore-errors --no-traverse
-                  if ($LASTEXITCODE -eq 0) {
-                      Write-Host "✅ State uploaded successfully."
-                  } else {
-                      Write-Host "⚠️ Upload exited with code $LASTEXITCODE (ignored)."
-                      $LASTEXITCODE = 0
-                  }
-              } catch {
-                  Write-Host "⚠️ Exception while uploading state — continuing anyway."
-              }
+          Write-Host "Triggering next workflow: ${{ github.workflow }} on branch: ${{ github.ref_name }}"
+          gh workflow run "${{ github.workflow }}" --ref ${{ github.ref_name }}
+          if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ Next workflow triggered successfully"
           } else {
-              Write-Host "⚠️ No local state file found to upload."
+              Write-Host "❌ Failed to trigger next workflow"
           }
-
