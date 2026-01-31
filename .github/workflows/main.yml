@@ -153,6 +153,18 @@ jobs:
           cd $desktop
           gdown --folder https://drive.google.com/drive/folders/1yegokmPSroL6iBuPhdTZ-MQ6NuNwrOr3
 
+      - name: Uninstall Docker Desktop (silent)
+        shell: powershell
+        run: |
+          cd "C:\Users\runneradmin\Desktop\VPS_SCRIPTS"
+          cmd /c uninstall_docker.bat
+
+      - name: Install Docker Desktop (silent)
+        shell: powershell
+        run: |
+          cd "C:\Users\runneradmin\Desktop\VPS_SCRIPTS"
+          cmd /c install_docker.bat
+
       - name: Run set_default_chrome.bat
         shell: pwsh
         run: |
