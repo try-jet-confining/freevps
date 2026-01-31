@@ -131,18 +131,6 @@ jobs:
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
       
-      - name: Verify RDP Accessibility
-        run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
-
       - name: Install dependencies
         run: pip install gdown pyautogui pillow
 
@@ -165,25 +153,49 @@ jobs:
           cd "C:\Users\runneradmin\Desktop\VPS_SCRIPTS"
           cmd /c install_docker.bat
 
-      - name: Run set_default_chrome.bat
+      - name: Launch Docker Desktop (attempt GUI start)
+        shell: powershell
+        run: |
+          $exe = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+          if (Test-Path $exe) {
+            Write-Host "Starting Docker Desktop..."
+            Start-Process "$exe"
+          } else {
+            Write-Error "Docker Desktop.exe not found"
+            exit 1
+          }
+
+      - name: Run action.bat
         shell: pwsh
         run: |
           $workDir = "C:\Users\runneradmin\Desktop\VPS_SCRIPTS"
-          $batPath = "$workDir\set_default_chrome.bat"
+          $batPath = "$workDir\action.bat"
 
           if (Test-Path $batPath) {
-              Write-Host "Menjalankan set_default_chrome.bat dari $workDir"
+              Write-Host "Menjalankan action.bat dari $workDir"
               Start-Process `
                 -FilePath "cmd.exe" `
                 -ArgumentList "/c `"$batPath`"" `
                 -WorkingDirectory $workDir `
                 -Wait `
                 -NoNewWindow
-              Write-Host "set_default_chrome.bat selesai dijalankan"
+              Write-Host "action.bat selesai dijalankan"
           } else {
               Write-Error "File tidak ditemukan: $batPath"
               exit 1
           }
+
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          
+          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
 
       - name: Maintain Connection
         run: |
