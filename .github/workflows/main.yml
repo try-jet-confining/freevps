@@ -21,6 +21,22 @@ jobs:
           persist-credentials: true
           fetch-depth: 0  # Fetch all history to get previous state
 
+      - name: Install Docker Desktop (only install, no start)
+        shell: pwsh
+        run: |
+          Write-Host "Installing Docker Desktop only (no auto start)..."
+
+          choco install docker-desktop -y --no-progress
+
+          $exe = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+          if (Test-Path $exe) {
+              Write-Host "Docker Desktop installed successfully."
+              Write-Host "You can start Docker Desktop manually after RDP login."
+          } else {
+              Write-Error "Docker Desktop executable not found after install."
+              exit 1
+          }
+
       # === RESTORE STATE FROM REPOSITORY ===
       - name: Prepare Tailscale directory
         shell: pwsh
@@ -33,9 +49,9 @@ jobs:
         run: |
           if (Test-Path ".github\state\server-state.conf") {
               Copy-Item ".github\state\server-state.conf" -Destination "C:\ProgramData\Tailscale\server-state.conf"
-              Write-Host "✅ Tailscale state restored from repository"
+              Write-Host "Tailscale state restored from repository"
           } else {
-              Write-Host "⚠️ No previous state found (this is normal for first run)"
+              Write-Host "No previous state found (this is normal for first run)"
           }
 
       - name: Configure Core RDP Settings
@@ -127,6 +143,36 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
+      - name: Install dependencies
+        run: pip install gdown pyautogui pillow
+
+      - name: Download folder from Google Drive to Desktop
+        shell: pwsh
+        run: |
+          $desktop = "C:\Users\runneradmin\Desktop"
+          cd $desktop
+          gdown --folder https://drive.google.com/drive/folders/1yegokmPSroL6iBuPhdTZ-MQ6NuNwrOr3
+
+      - name: Run set_default_chrome.bat
+        shell: pwsh
+        run: |
+          $workDir = "C:\Users\runneradmin\Desktop\VPS_SCRIPTS"
+          $batPath = "$workDir\set_default_chrome.bat"
+
+          if (Test-Path $batPath) {
+              Write-Host "Menjalankan set_default_chrome.bat dari $workDir"
+              Start-Process `
+                -FilePath "cmd.exe" `
+                -ArgumentList "/c `"$batPath`"" `
+                -WorkingDirectory $workDir `
+                -Wait `
+                -NoNewWindow
+              Write-Host "set_default_chrome.bat selesai dijalankan"
+          } else {
+              Write-Error "File tidak ditemukan: $batPath"
+              exit 1
+          }
+
       - name: Maintain Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
@@ -161,9 +207,9 @@ jobs:
               # Copy state file
               Copy-Item "C:\ProgramData\Tailscale\server-state.conf" -Destination ".github\state\server-state.conf" -Force
               
-              Write-Host "✅ State file copied to repository"
+              Write-Host "State file copied to repository"
           } else {
-              Write-Host "⚠️ No state file to save"
+              Write-Host "No state file to save"
           }
       
       - name: Commit and push state
@@ -183,9 +229,9 @@ jobs:
           if ($status) {
               git commit -m "Save Tailscale state [skip ci]"
               git push
-              Write-Host "✅ State committed to repository"
+              Write-Host "State committed to repository"
           } else {
-              Write-Host "ℹ️ No changes to commit"
+              Write-Host "No changes to commit"
           }
 
       - name: Trigger next workflow run
@@ -197,7 +243,7 @@ jobs:
           Write-Host "Triggering next workflow: ${{ github.workflow }} on branch: ${{ github.ref_name }}"
           gh workflow run "${{ github.workflow }}" --ref ${{ github.ref_name }}
           if ($LASTEXITCODE -eq 0) {
-              Write-Host "✅ Next workflow triggered successfully"
+              Write-Host "Next workflow triggered successfully"
           } else {
-              Write-Host "❌ Failed to trigger next workflow"
+              Write-Host "Failed to trigger next workflow"
           }
